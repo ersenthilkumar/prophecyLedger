@@ -1,2 +1,10 @@
 import { handlers } from '@/auth';
-export const { GET, POST } = handlers;
+import type { NextRequest } from 'next/server';
+
+export function GET(req: NextRequest) {
+  return handlers.GET(req);
+}
+
+export function POST(req: NextRequest) {
+  return handlers.POST(req);
+}
