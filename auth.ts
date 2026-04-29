@@ -2,10 +2,10 @@ import NextAuth from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { sql } from '@/lib/db';
+import authConfig from './auth.config';
 
-// Lazy config: function is only invoked at request time, never at build time.
-// This prevents AUTH_SECRET / DATABASE_URL checks from running during the build.
 export const { handlers, auth, signIn, signOut } = NextAuth(async () => ({
+  ...authConfig,
   providers: [
     Credentials({
       credentials: {
@@ -34,6 +34,4 @@ export const { handlers, auth, signIn, signOut } = NextAuth(async () => ({
       },
     }),
   ],
-  pages:   { signIn: '/login' },
-  session: { strategy: 'jwt' },
 }));
