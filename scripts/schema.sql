@@ -109,6 +109,38 @@ CREATE TABLE IF NOT EXISTS statement_uploads (
   uploaded_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS rent_units (
+  id                SERIAL PRIMARY KEY,
+  address           TEXT NOT NULL,
+  city              TEXT,
+  state             TEXT,
+  zip               TEXT,
+  unit_number       TEXT,
+  property_type     TEXT DEFAULT 'Residential',
+  tenant_first_name TEXT,
+  tenant_last_name  TEXT,
+  tenant_email      TEXT,
+  tenant_phone      TEXT,
+  monthly_rent      NUMERIC(10,2) NOT NULL,
+  rent_due_day      INTEGER DEFAULT 1,
+  lease_start       DATE,
+  lease_end         DATE,
+  status            TEXT DEFAULT 'active',
+  notes             TEXT,
+  created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS rent_payments (
+  id            SERIAL PRIMARY KEY,
+  unit_id       INTEGER NOT NULL REFERENCES rent_units(id) ON DELETE CASCADE,
+  payment_date  DATE NOT NULL,
+  amount_paid   NUMERIC(10,2) NOT NULL,
+  period_month  TEXT NOT NULL,
+  late_fee      NUMERIC(10,2) DEFAULT 0,
+  notes         TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Migrations for existing databases:
 -- ALTER TABLE loans ADD COLUMN IF NOT EXISTS wired_amount NUMERIC(14,2) DEFAULT 0;
 -- ALTER TABLE suggested_payments RENAME COLUMN plaid_transaction_id TO bank_transaction_id;
