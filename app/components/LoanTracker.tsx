@@ -7,6 +7,7 @@ import { addLoan, updateLoanStatus, deleteLoan, updateBorrower, updateLoan } fro
 import { signOutAction } from '../actions/auth';
 import { LogoMark } from './Logo';
 import type { LoanRecord, LoanAlert } from '../actions';
+import { expectedInterest, todayYMD } from '@/lib/interest';
 
 type Step = 1 | 2 | 3;
 
@@ -789,7 +790,7 @@ function AlertsPanel({ alerts }: { alerts: LoanAlert[] }) {
           {[3, 2, 1].flatMap(level =>
             alerts.filter(a => a.alert_level === level).map(alert => {
               const cfg = ALERT_CONFIG[level as 1 | 2 | 3];
-              const monthlyInterest = alert.outstanding_balance * (alert.interest_rate / 100 / 12);
+              const monthlyInterest = expectedInterest(todayYMD(), alert.outstanding_balance, alert.interest_rate, alert.origination_date);
               return (
                 <div key={alert.loan_id} className={`flex items-center gap-4 px-5 py-4 ${cfg.bg}`}>
                   <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${cfg.iconBg}`}>

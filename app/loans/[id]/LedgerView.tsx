@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition, useRef, useEffect } from 'react';
+import { useState, useTransition, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -9,6 +9,7 @@ import {
 } from '@/app/actions';
 import { LogoMark } from '@/app/components/Logo';
 import type { LoanRecord, Payment } from '@/app/actions';
+import { accrualPeriod, accruedInterest, dailyRate, todayYMD, type AccrualPeriod } from '@/lib/interest';
 
 const STATUSES = ['application', 'in_review', 'approved', 'active', 'paid_off', 'defaulted'] as const;
 const LOAN_TYPES = ['Hard Money', 'Bridge', 'Conventional', 'FHA', 'VA', 'DSCR', 'Interest Only', 'Other'];
@@ -42,6 +43,41 @@ function calcMonthlyPayment(principal: number, annualRate: number, termMonths: n
   return principal * (r * Math.pow(1 + r, termMonths)) / (Math.pow(1 + r, termMonths) - 1);
 }
 
+type Accrual = AccrualPeriod & {
+  balance: number;
+  dailyRate: number;
+  accrued: number;
+  alreadyPaid: number;
+  due: number;
+};
+
+function calcAccrual(paymentDate: string, loan: LoanRecord, payments: Payment[]): Accrual | null {
+  const period = accrualPeriod(paymentDate, loan.origination_date);
+  if (!period) return null;
+
+  const principalBefore = payments
+    .filter(p => p.payment_date < paymentDate)
+    .reduce((s, p) => s + p.principal_amount, 0);
+  const balance = Math.max(0, loan.loan_amount - principalBefore);
+  const accrued = accruedInterest(balance, loan.interest_rate, period.days);
+
+  // Interest already recorded in the collection month (M+1) counts against this period.
+  const collectMonth = paymentDate.slice(0, 7);
+  const alreadyPaid = payments
+    .filter(p => p.payment_date.startsWith(collectMonth))
+    .reduce((s, p) => s + p.interest_amount, 0);
+
+  return {
+    ...period, balance, accrued, alreadyPaid,
+    dailyRate: dailyRate(loan.interest_rate),
+    due: Math.max(0, Math.round((accrued - alreadyPaid) * 100) / 100),
+  };
+}
+
+function shortDate(d: Date) {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 export default function LedgerView({ loan, payments: initialPayments }: { loan: LoanRecord; payments: Payment[] }) {
   const router = useRouter();
   const payments = initialPayments;
@@ -67,7 +103,6 @@ export default function LedgerView({ loan, payments: initialPayments }: { loan: 
   const paidPct         = loan.loan_amount ? (totalPrincipal / loan.loan_amount) * 100 : 0;
   const isInterestOnly  = loan.loan_type?.toLowerCase().replace(/\s+/g, '_') === 'interest_only';
   const suggestedMonthly = calcMonthlyPayment(loan.loan_amount, loan.interest_rate, loan.loan_term, isInterestOnly);
-  const monthlyInterest  = outstanding * (loan.interest_rate / 100 / 12);
 
   const years = [...new Set(payments.map(p => p.payment_date.slice(0, 4)))].sort((a, b) => b.localeCompare(a));
   const filteredPayments  = yearFilter === 'all' ? payments : payments.filter(p => p.payment_date.startsWith(yearFilter));
@@ -79,16 +114,40 @@ export default function LedgerView({ loan, payments: initialPayments }: { loan: 
   const [amtInput, setAmtInput]        = useState('');
   const [principalInput, setPrincipal] = useState('');
   const [interestInput, setInterest]   = useState('');
+  const today = todayYMD();
+  const [payDate, setPayDate]          = useState(today);
 
-  useEffect(() => {
-    if (!showAdd) { setAmtInput(''); setPrincipal(''); setInterest(''); }
-  }, [showAdd]);
+  const accrual = calcAccrual(payDate, loan, payments);
+  // Interest-only loans pay exactly the accrued interest, which varies with days in the month
+  const suggestedAmount = isInterestOnly && accrual ? accrual.due : suggestedMonthly;
+
+  function openAddPayment() {
+    // Reset the form and pre-fill interest with the accrued amount due as of today
+    const initial = calcAccrual(today, loan, payments);
+    setPayDate(today);
+    setAmtInput('');
+    setPrincipal('');
+    setInterest(initial ? initial.due.toFixed(2) : '');
+    setFormError('');
+    setShowAdd(true);
+  }
+
+  function splitAmount(val: string, interestDue: number) {
+    const amt = parseFloat(val) || 0;
+    const interest = val ? Math.min(amt, interestDue) : interestDue;
+    setInterest(interest.toFixed(2));
+    setPrincipal(isInterestOnly ? '0.00' : Math.max(0, amt - interest).toFixed(2));
+  }
 
   function handleAmountChange(val: string) {
     setAmtInput(val);
-    const amt = parseFloat(val) || 0;
-    setInterest(monthlyInterest.toFixed(2));
-    setPrincipal(isInterestOnly ? '0.00' : Math.max(0, amt - monthlyInterest).toFixed(2));
+    splitAmount(val, accrual?.due ?? 0);
+  }
+
+  function handleDateChange(val: string) {
+    setPayDate(val);
+    const next = calcAccrual(val, loan, payments);
+    splitAmount(amtInput, next?.due ?? 0);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -311,7 +370,7 @@ export default function LedgerView({ loan, payments: initialPayments }: { loan: 
                 </select>
               )}
               <button
-                onClick={() => setShowAdd(true)}
+                onClick={openAddPayment}
                 className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 transition-all text-white text-xs font-bold px-4 py-2 rounded-xl shadow-sm"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -687,12 +746,13 @@ export default function LedgerView({ loan, payments: initialPayments }: { loan: 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-500 mb-1.5">Payment Date <span className="text-red-400">*</span></label>
-                  <input type="date" name="payment_date" required defaultValue={new Date().toISOString().split('T')[0]}
+                  <input type="date" name="payment_date" required
+                    value={payDate} onChange={e => handleDateChange(e.target.value)}
                     className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition-all" />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 mb-1.5">Amount Paid ($) <span className="text-red-400">*</span></label>
-                  <input type="number" name="amount_paid" required placeholder={suggestedMonthly.toFixed(2)} step="0.01"
+                  <input type="number" name="amount_paid" required placeholder={suggestedAmount.toFixed(2)} step="0.01"
                     value={amtInput}
                     onChange={e => handleAmountChange(e.target.value)}
                     className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition-all" />
@@ -703,11 +763,35 @@ export default function LedgerView({ loan, payments: initialPayments }: { loan: 
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <p className="text-[11px] text-indigo-600">
-                  {isInterestOnly ? 'Interest-only loan — ' : ''}Suggested: <strong>{currency(suggestedMonthly)}/mo</strong> · Interest portion: <strong>{currency(monthlyInterest)}</strong> · Outstanding: <strong>{currency(outstanding)}</strong>
+                  {isInterestOnly ? 'Interest-only loan — ' : ''}Suggested: <strong>{currency(suggestedAmount)}</strong> · Outstanding: <strong>{currency(outstanding)}</strong>
                   {isInterestOnly && <span className="ml-1 text-indigo-400">(principal not reduced)</span>}
-                  <span className="ml-1 text-indigo-400">· This payment covers {new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toLocaleString('en-US', { month: 'long' })}'s accrued interest</span>
                 </p>
               </div>
+              {accrual && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/60 overflow-hidden">
+                  <div className="flex items-center justify-between px-3.5 py-2 border-b border-amber-100">
+                    <p className="text-[10.5px] font-bold text-amber-800 uppercase tracking-[0.08em]">Accrued Interest</p>
+                    <p className="text-[11px] font-semibold text-amber-700">
+                      {accrual.notStarted
+                        ? 'Loan not yet originated for this period'
+                        : `${shortDate(accrual.periodStart)} – ${shortDate(accrual.periodEnd)}`}
+                    </p>
+                  </div>
+                  <div className="px-3.5 py-2.5 space-y-1 text-xs">
+                    <AccrualRow label="Principal balance" value={currency(accrual.balance)} />
+                    <AccrualRow label="Daily rate (actual/365)" value={`${loan.interest_rate}% ÷ 365 =${(accrual.dailyRate * 100).toFixed(5)}%`} />
+                    <AccrualRow label="Days accrued" value={`${accrual.days}`} />
+                    <AccrualRow label="Accrued interest" value={currency(accrual.accrued)} strong />
+                    {accrual.alreadyPaid > 0 && (
+                      <AccrualRow label="Already recorded for this period" value={`− ${currency(accrual.alreadyPaid)}`} />
+                    )}
+                    <div className="flex items-center justify-between pt-1.5 mt-1 border-t border-amber-200">
+                      <span className="font-bold text-amber-900">Interest due</span>
+                      <span className="font-black text-amber-900">{currency(accrual.due)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-3 gap-3 sm:gap-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-500 mb-1.5">Principal ($)</label>
@@ -753,6 +837,15 @@ function DR({ label, value }: { label: string; value: string }) {
     <div>
       <p className="text-[10.5px] font-bold text-slate-400 uppercase tracking-[0.08em]">{label}</p>
       <p className="text-sm font-semibold text-slate-700 mt-0.5 break-words">{value || '—'}</p>
+    </div>
+  );
+}
+
+function AccrualRow({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-amber-800/70">{label}</span>
+      <span className={strong ? 'font-bold text-amber-900' : 'font-semibold text-amber-900/80'}>{value}</span>
     </div>
   );
 }

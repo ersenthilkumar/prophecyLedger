@@ -1,10 +1,13 @@
 import type { BankTxn } from './parsers/chase-tsv';
+import { expectedInterest } from './interest';
 
 export type ActiveLoan = {
   id: number;
   loan_number: string;
   loan_amount: number;
   interest_rate: number;
+  outstanding_balance: number;
+  origination_date: string | null;
   first_name: string;
   last_name: string;
   coborrower_first_name: string | null;
@@ -43,9 +46,11 @@ export function matchDeposit(txn: BankTxn, loans: ActiveLoan[]): MatchResult {
     if (b.both || c.both) return { loanId: loan.id, confidence: 'high' };
   }
 
-  const monthlyInterest = (l: ActiveLoan) => (l.loan_amount * l.interest_rate) / 100 / 12;
+  // Actual/365 interest accrued over the month this deposit pays for
+  const interestDue = (l: ActiveLoan) =>
+    expectedInterest(txn.date, l.outstanding_balance, l.interest_rate, l.origination_date);
   const tolerance = Math.max(10, txn.amount * 0.03);
-  const amountMatches = (l: ActiveLoan) => Math.abs(monthlyInterest(l) - txn.amount) <= tolerance;
+  const amountMatches = (l: ActiveLoan) => Math.abs(interestDue(l) - txn.amount) <= tolerance;
 
   // 3. Last name only + amount within tolerance → medium
   for (const loan of loans) {

@@ -180,6 +180,7 @@ export type LoanAlert = {
   loan_amount: number;
   interest_rate: number;
   outstanding_balance: number;
+  origination_date: string | null;
   paid_this_month: number;
   today_day: number;
   alert_level: 1 | 2 | 3;
@@ -211,6 +212,7 @@ export async function getAlerts(): Promise<LoanAlert[]> {
       b.last_name,
       COALESCE(mp.paid, 0)::float                                       AS paid_this_month,
       GREATEST(0, l.loan_amount - COALESCE(tp.total, 0))::float        AS outstanding_balance,
+      TO_CHAR(l.origination_date, 'YYYY-MM-DD')                         AS origination_date,
       EXTRACT(DAY FROM CURRENT_DATE)::int                               AS today_day
     FROM   loans l
     JOIN   borrowers b ON l.borrower_id = b.id

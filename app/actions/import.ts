@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache';
 import { sql } from '@/lib/db';
 import { parseChaseTsv } from '@/lib/parsers/chase-tsv';
 import { matchDeposit, type ActiveLoan } from '@/lib/matching';
+import { expectedInterest } from '@/lib/interest';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -63,6 +64,8 @@ export async function importStatement(formData: FormData): Promise<ImportResult>
       l.id, l.loan_number,
       l.loan_amount::float   AS loan_amount,
       l.interest_rate::float AS interest_rate,
+      GREATEST(0, l.loan_amount - COALESCE(SUM(p.principal_amount), 0))::float AS outstanding_balance,
+      TO_CHAR(l.origination_date, 'YYYY-MM-DD') AS origination_date,
       b.first_name, b.last_name,
       b.coborrower_first_name, b.coborrower_last_name,
       ARRAY_REMOVE(ARRAY_AGG(DISTINCT TO_CHAR(p.payment_date, 'YYYY-MM')), NULL) AS payment_months
@@ -129,9 +132,17 @@ export async function getSuggestedPayments(): Promise<SuggestedPayment[]> {
       sp.loan_id,
       l.loan_number,
       CASE WHEN b.id IS NOT NULL THEN b.first_name || ' ' || b.last_name END AS borrower_name,
-      CASE WHEN l.id IS NOT NULL
-        THEN ROUND((l.loan_amount * l.interest_rate / 100 / 12)::numeric, 2)::float
-      END AS expected_interest,
+      l.interest_rate::float AS interest_rate,
+      TO_CHAR(l.origination_date, 'YYYY-MM-DD') AS origination_date,
+      (l.loan_amount - COALESCE((
+        SELECT SUM(p.principal_amount) FROM payments p
+        WHERE p.loan_id = l.id AND p.payment_date < sp.transaction_date
+      ), 0))::float AS balance,
+      COALESCE((
+        SELECT SUM(p.interest_amount) FROM payments p
+        WHERE p.loan_id = l.id
+          AND DATE_TRUNC('month', p.payment_date) = DATE_TRUNC('month', sp.transaction_date)
+      ), 0)::float AS interest_already_paid,
       sp.confidence,
       sp.status,
       sp.created_at::text
@@ -143,7 +154,25 @@ export async function getSuggestedPayments(): Promise<SuggestedPayment[]> {
       CASE sp.confidence WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
       sp.transaction_date DESC
   `;
-  return rows as SuggestedPayment[];
+  return rows.map(r => {
+    const { interest_rate, origination_date, balance, interest_already_paid, ...rest } = r as Record<string, unknown>;
+    return {
+      ...rest,
+      expected_interest: rest.loan_id == null ? null : interestDue(
+        rest.transaction_date as string, balance as number, interest_rate as number,
+        origination_date as string | null, interest_already_paid as number,
+      ),
+    } as SuggestedPayment;
+  });
+}
+
+/** Actual/365 interest accrued for the period this payment covers, less interest already recorded that month. */
+function interestDue(
+  paymentDate: string, balance: number, rate: number,
+  originationDate: string | null, alreadyPaid: number,
+): number {
+  const accrued = expectedInterest(paymentDate.slice(0, 10), Math.max(0, balance), rate, originationDate);
+  return Math.max(0, Math.round((accrued - alreadyPaid) * 100) / 100);
 }
 
 export async function getPendingSuggestionsCount(): Promise<number> {
@@ -157,11 +186,30 @@ export async function confirmSuggestion(id: number): Promise<{ ok: boolean; erro
   if (!s) return { ok: false, error: 'Suggestion not found.' };
   if (!s.loan_id) return { ok: false, error: 'No loan matched — assign a loan first.' };
 
+  const txnDate = String(s.transaction_date).slice(0, 10);
   const loanRows = await sql`
-    SELECT ROUND((loan_amount * interest_rate / 100 / 12)::numeric, 2) AS monthly_interest
-    FROM loans WHERE id = ${s.loan_id as number} LIMIT 1
+    SELECT
+      l.interest_rate::float AS interest_rate,
+      TO_CHAR(l.origination_date, 'YYYY-MM-DD') AS origination_date,
+      (l.loan_amount - COALESCE((
+        SELECT SUM(p.principal_amount) FROM payments p
+        WHERE p.loan_id = l.id AND p.payment_date < ${txnDate}::date
+      ), 0))::float AS balance,
+      COALESCE((
+        SELECT SUM(p.interest_amount) FROM payments p
+        WHERE p.loan_id = l.id
+          AND DATE_TRUNC('month', p.payment_date) = DATE_TRUNC('month', ${txnDate}::date)
+      ), 0)::float AS interest_already_paid
+    FROM loans l WHERE l.id = ${s.loan_id as number} LIMIT 1
   `;
-  const interest = loanRows[0]?.monthly_interest ?? s.amount;
+  const loan = loanRows[0];
+  const amount = Number(s.amount);
+  const interest = loan
+    ? Math.min(amount, interestDue(
+        txnDate, loan.balance as number, loan.interest_rate as number,
+        loan.origination_date as string | null, loan.interest_already_paid as number,
+      ))
+    : amount;
 
   const paymentRows = await sql`
     INSERT INTO payments (loan_id, payment_date, amount_paid, interest_amount, notes)
